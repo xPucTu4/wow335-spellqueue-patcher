@@ -1,0 +1,7 @@
+/dist/
+/trace.log
+/cast-error.log
+/spell-prepare-branch.log
+/launch-wow.sh
+/trace-*.gdb
+/trace-*.sh
