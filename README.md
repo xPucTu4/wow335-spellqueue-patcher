@@ -81,3 +81,5 @@ GOOS=windows GOARCH=amd64 go build -trimpath -o wow335-spellqueue-patcher.exe .
 ## License
 
 The patcher and its documentation are MIT licensed. World of Warcraft and Blizzard Entertainment are trademarks of their respective owner; no affiliation or endorsement is implied.
+
+See [AI_DISCLOSURE.md](AI_DISCLOSURE.md) for how AI assistance and human supervision contributed to this project.
