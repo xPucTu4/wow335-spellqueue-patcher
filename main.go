@@ -8,13 +8,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 )
 
-const version = "1.0.0"
+var version = "dev"
 
 type patchState string
 
@@ -205,6 +206,9 @@ func allPatched(value inspection) bool {
 func writeNew(path string, data []byte, mode os.FileMode) error {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode.Perm())
 	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("output already exists; choose another --output or remove the existing file first: %w", err)
+		}
 		return err
 	}
 	ok := false
@@ -233,10 +237,16 @@ func writeNew(path string, data []byte, mode os.FileMode) error {
 
 func run(arguments []string) error {
 	flags := flag.NewFlagSet("wow335-spellqueue-patcher", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
 	check := flags.Bool("check", false, "validate and report without writing an output")
 	output := flags.String("output", "", "output path (default: Wow-spellqueue.exe beside input)")
 	showVersion := flags.Bool("version", false, "print version")
 	if err := flags.Parse(arguments); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			flags.SetOutput(os.Stdout)
+			flags.Usage()
+			return nil
+		}
 		return err
 	}
 	if *showVersion {
@@ -265,7 +275,7 @@ func run(arguments []string) error {
 	}
 	if *check || allPatched(info) {
 		if allPatched(info) {
-			fmt.Println("Result: already patched")
+			fmt.Println("Result: already patched; no output written")
 		} else {
 			fmt.Println("Result: compatible and ready to patch")
 		}

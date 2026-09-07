@@ -1,0 +1,66 @@
+name: CI and release
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  CGO_ENABLED: '0'
+  GO_VERSION: '1.26.8'
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Check formatting and tests
+        run: |
+          test -z "$(gofmt -l main.go main_test.go)"
+          go vet ./...
+          go test ./...
+      - name: Cross-build
+        run: |
+          GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -o "$RUNNER_TEMP/patcher-linux" .
+          GOOS=windows GOARCH=amd64 go build -trimpath -buildvcs=false -o "$RUNNER_TEMP/patcher-windows.exe" .
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Build release binaries
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          mkdir -p dist
+          GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags "-X main.version=${RELEASE_TAG#v}" -o dist/wow335-spellqueue-patcher .
+          GOOS=windows GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags "-X main.version=${RELEASE_TAG#v}" -o dist/wow335-spellqueue-patcher.exe .
+          test "$(dist/wow335-spellqueue-patcher --version)" = "wow335-spellqueue-patcher ${RELEASE_TAG#v}"
+          cd dist
+          sha256sum wow335-spellqueue-patcher wow335-spellqueue-patcher.exe > SHA256SUMS
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --notes-from-tag \
+            dist/wow335-spellqueue-patcher dist/wow335-spellqueue-patcher.exe dist/SHA256SUMS

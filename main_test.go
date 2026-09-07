@@ -3,6 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -101,6 +107,16 @@ func TestRefusesInvalidAndAmbiguousInputs(t *testing.T) {
 	if _, err := inspect(corrupt); err == nil {
 		t.Fatal("unexpected target bytes were accepted")
 	}
+	wrongBuild := bytes.ReplaceAll(fixture(patchSites[0].original, patchSites[1].original, false), []byte("12340"), []byte("12341"))
+	if _, err := inspect(wrongBuild); err == nil {
+		t.Fatal("wrong build marker was accepted")
+	}
+	nearMiss := fixture(patchSites[0].original, patchSites[1].original, true)
+	matches := findSite(nearMiss, patchSites[0])
+	nearMiss[matches[1]+len(patchSites[0].prefix)] = 0xCC
+	if _, err := inspect(nearMiss); err == nil {
+		t.Fatal("ambiguous surrounding signatures were accepted")
+	}
 }
 
 func TestPreservesUnrelatedBytes(t *testing.T) {
@@ -114,6 +130,9 @@ func TestPreservesUnrelatedBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !bytes.Equal(data, original) {
+		t.Fatal("input was modified")
+	}
 	allowed := map[int]bool{}
 	for _, site := range before.sites {
 		for index := range site.site.original {
@@ -126,5 +145,142 @@ func TestPreservesUnrelatedBytes(t *testing.T) {
 		if original[index] != result[index] && !allowed[index] {
 			t.Fatalf("unrelated byte changed at 0x%X", index)
 		}
+	}
+}
+
+func TestKnownOutputMismatch(t *testing.T) {
+	data := fixture(patchSites[0].original, patchSites[1].original, false)
+	before, err := inspect(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before.hash = "aa63a5750d60ef16746c686b3d5e26876d98953eab08b1c026cd0faf78e88cb8"
+	if _, err := apply(data, before); err == nil || !strings.Contains(err.Error(), "known-input output hash mismatch") {
+		t.Fatalf("expected hash mismatch, got %v", err)
+	}
+}
+
+// Run the real CLI entrypoint in a subprocess so exit codes and both streams are checked.
+func TestCLIProcess(t *testing.T) {
+	if os.Getenv("PATCHER_TEST_PROCESS") == "1" {
+		os.Args = append([]string{os.Args[0]}, os.Args[3:]...)
+		main()
+		os.Exit(0)
+	}
+}
+
+func TestCLI(t *testing.T) {
+	for _, name := range []string{"help", "bad-flag", "version", "check", "already-patched", "in-place", "collision", "write"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			input, output := filepath.Join(dir, "Wow.exe"), filepath.Join(dir, "Wow-spellqueue.exe")
+			data := fixture(patchSites[0].original, patchSites[1].original, false)
+			args := []string{input}
+			wantExit, wantOut, wantErr := 0, "", ""
+			switch name {
+			case "help":
+				args, wantOut = []string{"--help"}, "Usage of wow335-spellqueue-patcher:"
+			case "bad-flag":
+				args, wantExit, wantErr = []string{"--unknown"}, 1, "Error: flag provided but not defined: -unknown"
+			case "version":
+				args, wantOut = []string{"--version"}, "wow335-spellqueue-patcher "+version
+			case "check":
+				args, wantOut = []string{"--check", input}, "compatible and ready to patch"
+			case "already-patched":
+				data = fixture(patchSites[0].replacement, patchSites[1].replacement, false)
+				args, wantOut = []string{"--output", output, input}, "already patched; no output written"
+			case "in-place":
+				args, wantExit, wantErr = []string{"--output", input, input}, 1, "refusing to patch in place"
+			case "collision":
+				if err := os.WriteFile(output, []byte("keep me"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				wantExit, wantErr = 1, "output already exists; choose another --output"
+			case "write":
+				wantOut = "Created: " + output
+			}
+			if err := os.WriteFile(input, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(os.Args[0], append([]string{"-test.run=^TestCLIProcess$", "--"}, args...)...)
+			cmd.Env = append(os.Environ(), "PATCHER_TEST_PROCESS=1")
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			if err != nil {
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) {
+					t.Fatal(err)
+				}
+			}
+			if cmd.ProcessState.ExitCode() != wantExit || !strings.Contains(stdout.String(), wantOut) {
+				t.Fatalf("exit=%d stdout=%q stderr=%q", cmd.ProcessState.ExitCode(), stdout.String(), stderr.String())
+			}
+			if (wantErr == "" && stderr.Len() != 0) || (wantErr != "" && strings.Count(stderr.String(), wantErr) != 1) {
+				t.Fatalf("unexpected stderr: %q", stderr.String())
+			}
+			if name == "bad-flag" && stderr.String() != wantErr+"\n" {
+				t.Fatalf("duplicate flag diagnostics: %q", stderr.String())
+			}
+			unchanged, err := os.ReadFile(input)
+			if err != nil || !bytes.Equal(unchanged, data) {
+				t.Fatalf("input changed: %v", err)
+			}
+			written, err := os.ReadFile(output)
+			switch name {
+			case "write":
+				expected := fixture(patchSites[0].replacement, patchSites[1].replacement, false)
+				if err != nil || !bytes.Equal(written, expected) {
+					t.Fatalf("incorrect output: %v", err)
+				}
+			case "collision":
+				if err != nil || string(written) != "keep me" {
+					t.Fatalf("existing output changed: %v", err)
+				}
+			default:
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("unexpected output file: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestPristineClientIntegration(t *testing.T) {
+	path := os.Getenv("WOW_EXE")
+	if path == "" {
+		t.Skip("set WOW_EXE to the documented pristine build-12340 executable")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest(data) != "aa63a5750d60ef16746c686b3d5e26876d98953eab08b1c026cd0faf78e88cb8" {
+		t.Fatal("WOW_EXE must be the documented pristine input")
+	}
+	original := bytes.Clone(data)
+	before, err := inspect(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := apply(data, before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest(result) != "47073149dff70ac1e06fa9aa600935181620e6449fd01538945ff47c710678a5" {
+		t.Fatal("patched hash differs from the documented output")
+	}
+	var changed []int
+	for index := range data {
+		if data[index] != result[index] {
+			changed = append(changed, index)
+		}
+	}
+	if !slices.Equal(changed, []int{0x338B7D, 0x40C777, 0x40C778}) {
+		t.Fatalf("unexpected changed offsets: %X", changed)
+	}
+	onDisk, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(original, data) || !bytes.Equal(original, onDisk) {
+		t.Fatalf("input changed: %v", err)
 	}
 }

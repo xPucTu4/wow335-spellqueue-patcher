@@ -1,4 +1,7 @@
 /dist/
+*.exe
+/wow335-spellqueue-patcher
+/SHA256SUMS
 /trace.log
 /cast-error.log
 /spell-prepare-branch.log

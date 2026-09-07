@@ -6,6 +6,10 @@ The stock WoW 3.3.5a build 12340 client normally consumes some spell keypresses 
 
 The working client patch bypasses two local cooldown-only diversions. It changes three bytes in total and lets execution continue through the client's normal cast validation and packet construction. AzerothCore still accepts or rejects the request according to its normal spell rules and queue window.
 
+The bypasses are unconditional, including for spell cooldowns much longer than the queue window. Repeated attempts that pass the remaining client checks can therefore send additional `CMSG_CAST_SPELL` packets for an unavailable spell. The corresponding cooldown rejection depends on a server round trip, replacing the immediate local error on these paths. This patch does not synthesize keypresses or packets, and it does not guarantee that every keypress reaches packet construction.
+
+With `SpellQueue.Enabled = 0`, AzerothCore does not accept queue requests; its ordinary cast validation still rejects unavailable casts. The patched client retains the extra requests and server-dependent feedback without a queueing benefit.
+
 ## Exact patch
 
 The addresses below apply to the tested PE32 executable with image base `0x00400000`, `.text` virtual address `0x00401000`, and `.text` raw file offset `0x400`.
@@ -16,6 +20,10 @@ The addresses below apply to the tested PE32 executable with image base `0x00400
 | Bypass the later local not-ready diversion | `0x338B7D` | `0x0073977D` | `74 20` (`JZ +0x20`) | `EB 20` (`JMP +0x20`) |
 
 The offsets are useful for confirming the tested binaries, but the redistributable patcher does not trust them. It searches only the PE `.text` section for the surrounding signatures and requires exactly one occurrence of each.
+
+It counts matching prefix/suffix contexts before checking the branch bytes. A second context with unfamiliar middle bytes is deliberately ambiguous, not silently discarded. This conservative refusal avoids choosing between a recognized site and another possibly modified site. Code relocated outside `.text` is not discovered; unrelated injected sections are not audited.
+
+The PE checksum is left unchanged. The tested clients load with the unchanged checksum; recalculating it would add changes beyond the three documented byte positions.
 
 ### Hex-editor reproduction
 
@@ -85,6 +93,10 @@ We then used a two-hardware-breakpoint Intel Processor Trace capture around only
 
 Neutralizing that first branch changed the symptom from a silent click to the spoken “spell is not ready yet” response, but still sent no packet. A focused cast-error trace then recorded result 67 (`SPELL_FAILED_NOT_READY`) from caller `0x00739791`, inside the spell-usability predicate beginning at `0x00739650`. Its dedicated branch is at `0x0073977D`. Bypassing that second cooldown-only diversion produced the working three-byte patch.
 
+Disassembly of the documented pristine input shows one direct call to `0x00739650`, at `0x0080D6D1` in the preparation path. This is a direct-call observation, not proof that no indirect caller exists. The patch changes the cast-path branches rather than the shared cooldown query at `0x00809000`; it does not modify action-bar cooldown rendering code.
+
+The attribute test immediately after the first patch site is `test [ebp-0x2A8], 0x404` at `0x0080D379`. The mask combines `SPELL_ATTR0_ON_NEXT_SWING_NO_DAMAGE` (`0x4`) and `SPELL_ATTR0_ON_NEXT_SWING` (`0x400`), the two on-next-melee-swing flags in AzerothCore's `SpellAttr0`. This attribute check remains intact: those spells can still take that special path after the cooldown branch is bypassed. It is not a blanket bypass of every preparation guard.
+
 ## Failed approaches and why
 
 - **Increasing `SpellQueue.Window` alone:** ineffective when the client sends no opcode. Server policy cannot queue a request it never receives.
@@ -100,7 +112,13 @@ Neutralizing that first branch changed the symptom from a silent click to the sp
 
 Both changed branches are client-side responses to the local cooldown lookup. The patch does not jump directly to packet sending; it lets execution proceed through the existing usability, targeting, cast construction, and send path. Other failures remain in place.
 
-When a request is transmitted too early, AzerothCore rejects it with `SPELL_FAILED_SPELL_IN_PROGRESS` (result 105) and the active cast continues. When transmitted inside the configured window, AzerothCore retains and replays the queued request after the current spell completes. Timing policy therefore remains entirely server-side.
+In the recorded Fireball cast-chain tests, requests transmitted too early were rejected with `SPELL_FAILED_SPELL_IN_PROGRESS` (result 105) and the active cast continued. Requests inside the configured window were retained and replayed after the current spell completed. Other rejection reasons still depend on the server's normal validation. Timing policy remains entirely server-side.
+
+### Why there is no client-side timing threshold
+
+A conditional bypass based on remaining cooldown could reduce unnecessary requests and preserve immediate feedback for long cooldowns. It is a different, more involved patch: the call at `0x00739773` currently passes three zero arguments alongside the spell ID and the lookup flag. Using cooldown outputs would require verifying their meaning and units, supplying storage, adding timing comparisons and control flow, and choosing how the client threshold tracks each server's queue window. That cannot be obtained by the current three-byte branch edit.
+
+This design deliberately accepts the extra requests in exchange for a small static patch and one server-owned timing policy. Conditional timing is a possible future alternative, not implemented or promised by this release.
 
 ## Runtime evidence
 
@@ -118,7 +136,7 @@ The redistributable patcher was then tested against both intended inputs:
 - The composite input produced hash `cce863e6...`, queued cast counter 2 behind cast counter 1, and completed the following cast counter 3 normally.
 - The Windows patcher was executed under Wine and produced an output byte-for-byte identical to the Linux patcher output.
 
-Separate smoke coverage of every spell shape is still useful for wider compatibility claims. The core Fireball queue, too-early server rejection, and ordinary cancellation behavior are proven.
+The developer also manually tested many other spells. The Fireball trace above is the detailed recorded example, not the only spell tested. No exhaustive spell-by-spell matrix is published, so these notes do not claim complete coverage of channels, autorepeat, on-next-melee-swing attacks, pet spells, item/trinket use, macros, or UI behavior.
 
 ## Patcher design
 
@@ -126,7 +144,7 @@ The implementation is a single Go program using only the standard library:
 
 1. Parse the input as Windows PE.
 2. Require i386 PE32, `.text`, and embedded build 12340/version 3.3.5 markers.
-3. Locate both signatures exactly once in `.text` while allowing either original or patched branch bytes.
+3. Require exactly one surrounding prefix/suffix context per site in `.text`, then require original or patched branch bytes.
 4. Copy the input in memory and modify only unpatched sites.
 5. Audit the changed offsets, reinspect the result, and verify known output hashes when the input hash is known.
 6. Create a separate output using exclusive-create semantics and read it back to verify its digest.
