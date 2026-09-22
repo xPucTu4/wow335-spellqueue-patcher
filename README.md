@@ -92,7 +92,7 @@ Cross-compile the Windows binary from Linux:
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -buildvcs=false -o wow335-spellqueue-patcher.exe .
 ```
 
-Local builds report `dev`. To stamp a release version, add `-ldflags '-X main.version=1.0.1'`. Official releases use the Go version and build flags pinned in [.github/workflows/ci.yml](.github/workflows/ci.yml); use that toolchain and the tagged source to reproduce the binaries.
+Local builds report `dev`. To stamp a release version, add `-ldflags '-X main.version=1.0.2'`. Official releases use the Go version and build flags pinned in [.github/workflows/ci.yml](.github/workflows/ci.yml); use that toolchain and the tagged source to reproduce the binaries.
 
 An optional integration check uses your own pristine client without writing a patched executable:
 
